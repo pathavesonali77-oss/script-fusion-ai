@@ -65,97 +65,22 @@ export const ANATOMY_GUARD =
 
 
 
-export async function zaiChat(
-  messages: { role: string; content: string }[],
+/**
+ * Every text call in the app goes through Gemini (see gemini.server.ts):
+ * one key at a time, newest flash model first, automatic switch to the next
+ * key when a daily quota runs out.
+ */
+export async function textChat(
+  system: string,
+  user: string,
   opts: {
     temperature?: number;
-    model?: string;
-    maxTokens?: number;
+    maxOutputTokens?: number;
     timeoutMs?: number;
     attempts?: number;
-    /** Scene/batch index — spreads concurrent calls over the key pool. */
-    slot?: number;
   } = {},
 ): Promise<string> {
-  const keys = paralonKeys();
-
-  const attempts = opts.attempts ?? 4;
-  let lastErr = "";
-  let lastKey: string | undefined;
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    // MEASURED LIMIT: the provider allows 5 requests per minute PER KEY. Waves
-    // of parallel calls used to spend the whole minute collecting 429s, which
-    // looked like the run hanging at "prompts 0/N". The scheduler now waits for
-    // a genuinely free slot on the least-busy key before every request.
-    const key = await acquireBestKey(keys, PARALON_RPM, lastKey);
-    lastKey = key;
-    try {
-      const res = await fetch(CHAT_URL, {
-        method: "POST",
-        signal: AbortSignal.timeout(opts.timeoutMs ?? 150_000),
-        headers: {
-          Authorization: `Bearer ${key}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          // Free model only: the keys hold zero credits, so never fall back
-          // to a paid model.
-          model: opts.model ?? CHAT_MODEL,
-          temperature: opts.temperature ?? 0.6,
-          // Disable Qwen3 thinking/reasoning mode so the model answers directly
-          // and returns much faster. vLLM reads it from chat_template_kwargs;
-          // the flat flag is kept for gateways that look at the top level.
-          enable_thinking: false,
-          chat_template_kwargs: { enable_thinking: false },
-          max_tokens: opts.maxTokens ?? 4000,
-          messages,
-        }),
-      });
-      if (!res.ok) {
-        lastErr = `${res.status} ${await res.text().catch(() => "")}`.slice(0, 300);
-        // 401/403 = bad key, 400 = the request itself (usually too long) — both
-        // are pointless to retry on the same payload.
-        if (res.status === 400 || res.status === 401 || res.status === 403) break;
-        // 429 means our local window drifted from the provider's: burn this
-        // key's remaining quota so the scheduler moves on to another one.
-        if (res.status === 429) {
-          for (let i = 0; i < PARALON_RPM; i++) await acquire(key, PARALON_RPM);
-          continue;
-        }
-      } else {
-        const json = (await res.json()) as {
-          choices?: { message?: { content?: string; reasoning?: string } }[];
-        };
-        const msg = json.choices?.[0]?.message;
-        const text = msg?.content?.trim() || extractFromReasoning(msg?.reasoning);
-        if (text) return text;
-        lastErr = "empty completion";
-      }
-    } catch (e) {
-      lastErr = e instanceof Error ? e.message : String(e);
-    }
-    // 502/504 come from the provider's edge (HTML body), not the model:
-    // back off progressively instead of failing the whole batch.
-    if (attempt < attempts - 1) await new Promise((r) => setTimeout(r, 600 * (attempt + 1)));
-  }
-
-
-  throw new Error(`Text model request failed: ${lastErr}`);
-}
-
-/** Last-resort salvage: pull a JSON array out of truncated reasoning text. */
-function extractFromReasoning(reasoning?: string): string | null {
-  if (!reasoning) return null;
-  const start = reasoning.indexOf("[");
-  const end = reasoning.lastIndexOf("]");
-  if (start === -1 || end <= start) return null;
-  const slice = reasoning.slice(start, end + 1);
-  try {
-    const parsed = JSON.parse(slice) as unknown;
-    return Array.isArray(parsed) ? slice : null;
-  } catch {
-    return null;
-  }
+  return geminiChat(user, { system, ...opts });
 }
 
 function stripFences(s: string): string {
