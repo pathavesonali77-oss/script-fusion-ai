@@ -421,193 +421,87 @@ const PROMPT_SYSTEM =
   "and never break one prompt across two lines.";
 
 
-const CHUNK_SYSTEM =
-  "You are a webtoon (manhwa) art director. You are given a character bible, the story so far, and one CHUNK of consecutive " +
-  "script lines (Hindi/Hinglish) with timestamps. Analyse ONLY this chunk and return a compact English CHUNK BRIEF " +
-  "that a storyboard artist will use to draw every line of this chunk.\n" +
-  "Return plain text with exactly these labelled lines:\n" +
-  "SETTING: the place(s) this chunk happens in, with 5-8 concrete visual details (architecture, materials, colours, " +
-  "furniture, objects, plants, weather, time of day). If the bible has a matching 'Place - ' line, reuse its details verbatim.\n" +
-  "CAST: only the people who actually appear in this chunk, each with their fixed traits (from the bible if listed there, " +
-  "otherwise invent a short fixed look: age, gender, hair, clothing colour). ALWAYS state each person's gender " +
-  "explicitly as 'male' or 'female' with a matching noun, identical every time that person appears in the story. " +
-  "Write 'none' if the chunk has no people.\n" +
-  "OBJECTS: the specific things/phenomena the chunk mentions (gates, storm, letter, vehicle...) and how they look.\n" +
-  "LIGHT: the natural lighting and colour of this chunk exactly as the script implies (time of day, light source, sky, " +
-  "dominant colours) — factual only, never add gloom, darkness or mystery the script does not state.\n" +
-  "BEATS: one short line per numbered script line, in this exact format — 'n) LOCATION: <the place this shot happens " +
-  "in, 3-6 words> | WHO: <exact character names visible in this shot, comma separated, or 'no people'> | <what visibly " +
-  "happens>'.\n" +
-  "LOCATION rules: it must stay the SAME for every line of the chunk unless the script line itself clearly moves the " +
-  "scene somewhere else (a stated new place, a door opened, a journey). Dialogue, whispering, reactions and thoughts " +
-  "NEVER change the location.\n" +
-  "WHO rules (critical): resolve every Hindi pronoun (वो, वह, उसने, उसके, उसकी, इसने, उन्होंने, वे) to the ACTUAL " +
-  "character it refers to by reading the surrounding lines of this chunk and the story so far — it is very often a SIDE " +
-  "character, not the protagonist. Never write the protagonist's name unless that line truly shows him. Write the " +
-  "resolved names only (e.g. 'WHO: Marie' or 'WHO: Marie, the team captain'). If the line names no person by noun and " +
-  "no pronoun refers to a person — a place, sky, object, weather, phenomenon or narration about the world — write " +
-  "exactly 'WHO: no people'. For unnamed masses write 'WHO: crowd'. Do NOT add any human to a line that has none.\n" +
-  "GENDER rule (critical): after each name in WHO, add its gender in brackets, e.g. 'WHO: Henan (male), Priya (female)'. " +
-  "Use the bible/CAST gender and keep it identical for that character in every beat of every chunk.\n" +
-  "STATE: the LAST line of your answer must be a single handover line for the next chunk, in this exact format — " +
-  "'STATE: PLACE: <the place the chunk ends in, worded exactly as in the BEATS> | TIME: <time of day> | " +
-  "WEATHER: <weather/sky> | WEARING: <each present character and the clothes they are currently in> | " +
-  "PROPS: <objects still in the scene> | WITH: <who is together in the scene right now>'. " +
-  "If a STORY SO FAR / CONTINUITY STATE was given to you, you MUST start from it: the first beat of this chunk " +
-  "continues in that same PLACE, TIME, WEATHER and clothing unless a script line in this chunk clearly changes it.\n" +
-  "Be specific and faithful to the script. No commentary, no headings other than the labels above. Answer immediately.";
+/** Hard ceiling on how much script text is pasted into one request. */
+const MAX_SCRIPT_CHARS = 600_000;
 
-
-
-
-/**
- * Reads one chunk of the script and returns a brief (setting, cast present,
- * objects, mood, per-line beats). Written before the chunk's prompts so every
- * panel in the chunk shares the same analysed context — this is what keeps
- * detail and continuity inside a chunk.
- */
-export async function analyzeChunk(
-  bible: string,
-  segments: Segment[],
-  slot = 0,
-  context = "",
-): Promise<string> {
-  const numbered = segments.map((s, i) => `${i + 1}. [${s.start}s-${s.end}s] ${s.text}`).join("\n");
-  try {
-    const out = await zaiChat(
-      [
-        { role: "system", content: CHUNK_SYSTEM },
-        {
-          role: "user",
-          content:
-            `CHARACTER BIBLE:\n${bible}\n\n` +
-            (context ? `STORY SO FAR:\n${context}\n\n` : "") +
-            `CHUNK SCRIPT LINES:\n${numbered}`,
-        },
-      ],
-      {
-        temperature: 0.4,
-        maxTokens: 500 + segments.length * 100,
-        timeoutMs: 180_000,
-        attempts: 2,
-        slot,
-      },
-    );
-    return stripFences(out).slice(0, 6000);
-  } catch (e) {
-    console.error("analyzeChunk failed:", e instanceof Error ? e.message : e);
-    return "";
-  }
+/** Numbers the WHOLE script, 1-based, exactly as the model must answer it. */
+function numberScript(all: Segment[]): string {
+  const text = all.map((s, i) => `${i + 1}. [${s.start}s-${s.end}s] ${s.text}`).join("\n");
+  return text.length <= MAX_SCRIPT_CHARS ? text : text.slice(0, MAX_SCRIPT_CHARS);
 }
 
 /**
- * Writes one image prompt per segment, in batches.
+ * Writes image prompts for lines `from`..`to` (1-based, inclusive) while the
+ * model reads the ENTIRE script.
  *
- * `context` carries the chunk brief plus the script lines immediately before
- * this chunk so the model knows where the scene is and who is present — that
- * continuity is what stops panels from losing story detail at chunk boundaries.
+ * There is no chunk system any more: Gemini gets the full script and the full
+ * character bible on every call, so continuity comes from the model actually
+ * seeing the whole story rather than from stitched-together chunk briefs. A
+ * pass only limits how many prompts are ASKED FOR at once, because the answer
+ * (not the input) is what has a token ceiling.
  */
-
 export async function writePrompts(
   bible: string,
-  segments: Segment[],
-  slot = 0,
-  context = "",
-  brief = "",
+  all: Segment[],
+  from: number,
+  to: number,
 ): Promise<string[]> {
-  const numbered = segments.map((s, i) => `${i + 1}. [${s.start}s-${s.end}s] ${s.text}`).join("\n");
+  const count = to - from + 1;
+  if (count <= 0) return [];
+  const script = numberScript(all);
 
-  const ask = async (segs: Segment[], lines: string, s: number, temp: number) =>
-    zaiChat(
-      [
-        { role: "system", content: PROMPT_SYSTEM },
-        {
-          role: "user",
-          content:
-            `CHARACTER BIBLE:\n${bible}\n\n` +
-            (context ? `STORY SO FAR (context only — do NOT storyboard these):\n${context}\n\n` : "") +
-            (brief
-              ? `CHUNK BRIEF (analysis of exactly these lines — obey its SETTING, CAST, OBJECTS, LIGHT and per-line BEATS; ` +
-                `never add a person the BEATS call 'no people'):\n${brief}\n\n`
-              : "") +
-            `SCRIPT LINES:\n${lines}\n\nWrite exactly ${segs.length} numbered prompt lines, ` +
-            `numbered 1 to ${segs.length}, one per script line above, in order. Plain text only.`,
-
-        },
-      ],
-
+  const ask = async (want: number[], temp: number) => {
+    const list = want.join(", ");
+    return textChat(
+      PROMPT_SYSTEM,
+      `CHARACTER BIBLE:\n${bible || "(none)"}\n\n` +
+        `FULL SCRIPT (every line is numbered; read all of it for continuity):\n${script}\n\n` +
+        `NOW WRITE PROMPTS ONLY FOR THESE LINE NUMBERS: ${list}.\n` +
+        `Output exactly ${want.length} lines, each starting with the script line's own number, ` +
+        `then ') ', then the prompt. Nothing else.`,
       {
         temperature: temp,
-        maxTokens: 500 + segs.length * 320,
-        // Small batches answer in a few seconds; a call that hangs longer is
-        // stuck, so fail over to another key instead of blocking the wave.
-        timeoutMs: 180_000,
-        attempts: 3,
-        slot: s,
+        // ~200 tokens of prompt per line, plus head-room.
+        maxOutputTokens: Math.min(60_000, 2_000 + want.length * 320),
       },
     );
+  };
 
-  let arr: unknown[] = [];
+  const wanted = Array.from({ length: count }, (_, i) => from + i);
+  const byNumber = new Map<number, string>();
+
+  const absorb = (raw: string) => {
+    // Answers are numbered with the GLOBAL line number, so the parser is fed
+    // the highest expected number and the results re-keyed.
+    const parsed = parseNumberedList(raw, all.length);
+    parsed.forEach((v, idx) => {
+      if (typeof v === "string" && v.trim().length > 30) byNumber.set(idx + 1, v.trim());
+    });
+  };
+
   try {
-    // Lenient plain-line format: strict JSON was being refused by the free
-    // model, which threw away every prompt in the chunk.
-    arr = parseNumberedList(await ask(segments, numbered, slot, 0.7), segments.length);
+    absorb(await ask(wanted, 0.7));
   } catch (e) {
-    console.error("writePrompts first pass failed:", e instanceof Error ? e.message : e);
-    arr = [];
+    console.error("writePrompts pass failed:", e instanceof Error ? e.message : e);
   }
 
-  const usable = (v: unknown) => typeof v === "string" && v.trim().length > 30;
-
-  // Repair pass: one timestamp must always get its own prompt, so anything the
-  // first pass dropped or truncated is asked for again on a different key.
-  const missing = segments.map((_, i) => i).filter((i) => !usable(arr[i]));
+  // Repair pass: one timestamp must always get its own prompt.
+  const missing = wanted.filter((n) => !byNumber.has(n));
   if (missing.length > 0) {
     try {
-      const subset = missing.map((i) => segments[i]!);
-      const lines = subset.map((s, i) => `${i + 1}. [${s.start}s-${s.end}s] ${s.text}`).join("\n");
-      const fixed = parseNumberedList(await ask(subset, lines, slot + 1, 0.5), subset.length);
-      missing.forEach((segIdx, k) => {
-        if (usable(fixed[k])) arr[segIdx] = fixed[k];
-      });
-
+      absorb(await ask(missing, 0.5));
     } catch (e) {
       console.error("writePrompts repair failed:", e instanceof Error ? e.message : e);
     }
   }
 
-  // Beat data, then gap-filled: a beat the analysis left without a LOCATION or
-  // WHO inherits the previous beat's, so a missing line can never restart the
-  // scene somewhere else or hand the shot to the wrong character.
-  const locations = carryForward(parseBeatLocations(brief), segments.length);
-  const casts = carryForward(parseBeatCast(brief), segments.length);
-  const actions = parseBeatActions(brief);
-  const state = parseState(brief);
-  const chunkCast = parseCastBlock(brief);
-
-  // One timestamp = one image: the returned array is always exactly as long as
-  // `segments`, in the same order, with a fallback prompt rather than a hole.
-  const built = segments.map((s, i) => {
-    const v = arr[i];
-    const text = usable(v) ? (v as string).trim() : null;
-    const action = actions[i + 1];
-    // Zeroth safety net: the free model writes lazily short prompts that lose
-    // the scene, so anything thin is topped up from the chunk brief.
-    const dense = expandPrompt(text ?? fallbackPrompt(s, action), brief, action);
-    // Safety net: if the model drifted away from the beat's own LOCATION, pin
-    // it back so the render can't relocate the scene.
-    const pinned = enforceLocation(dense, locations[i + 1]);
-    // Second safety net: keep the cast exactly as the chunk analysis resolved it
-    // (including "nobody"), so pronoun lines can't fall back to the protagonist.
-    const cast = castLock(enforceCast(pinned, casts[i + 1]), chunkCast, bible);
-    // Third safety net: if the prompt lost this line's own action, pin the beat's
-    // analysed action back so the image still shows what the script line says.
-    return sanitizePrompt(enforceWorldState(enforceBeatAction(cast, action), state));
+  const built = wanted.map((n) => {
+    const seg = all[n - 1] as Segment;
+    const text = byNumber.get(n) ?? fallbackPrompt(seg);
+    return sanitizePrompt(text);
   });
 
-  // Final pass: chain each panel to the one before it so the render is a
-  // continuation of the previous image rather than a fresh interpretation.
-  return chainContinuity(built, locations);
+  return chainContinuity(built);
 }
 
 /**
