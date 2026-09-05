@@ -256,66 +256,37 @@ function clean(v: string): string {
  */
 export async function buildCharacterBible(script: string): Promise<string> {
   const system =
-    "You are the art director of a full-colour webtoon (manhwa) adaptation. Read the script (it may be " +
+    "You are the art director of a full-colour webtoon (manhwa) adaptation. Read the WHOLE script (it may be " +
     "Hinglish/Hindi) and list the recurring characters. For each, give ONE compact English line of FIXED, highly " +
     "specific visual traits usable verbatim inside an image prompt: age, gender, exact hair colour + length + style, " +
     "eye colour, skin tone, face shape, one distinguishing feature (scar, mole, glasses, bandage), build/height, and " +
     "signature clothing WITH exact colours. Be concrete — these traits must let an artist redraw the same person " +
-    "hundreds of times identically. 16-28 words per character. Max 6 characters. " +
-    "After the characters, add up to 4 recurring LOCATIONS the same way, one line each, prefixed 'Place - ', with " +
+    "hundreds of times identically. 16-28 words per character. Max 10 characters. " +
+    "After the characters, add up to 6 recurring LOCATIONS the same way, one line each, prefixed 'Place - ', with " +
     "fixed visual details (materials, colours, key furniture/landmarks, time of day if fixed) so the same place is " +
     "drawn identically every time it appears, e.g. 'Place - Henan's home: small brick village house, blue wooden " +
     "door, clay-tiled roof, neem tree in the yard, string cot outside'. " +
-    "You are given only the OPENING of the script; that is enough — do not ask for more. " +
     "CRITICAL: determine each character's gender from the script (names, pronouns, relationships like brother/sister) " +
     "and make the gender the FIRST and most emphasized trait — write 'male' or 'female' explicitly plus a matching " +
     "noun (man/woman/boy/girl). Never guess wrong or leave gender ambiguous. " +
     "Output plain lines like: Henan: male, 17-year-old Indian boy, messy jet-black hair, dark brown eyes, tan skin, " +
     "thin wiry build, faded grey school shirt with frayed collar, small scar above left eyebrow. " +
-    "No headings, no numbering, no extra commentary. Do not deliberate — answer immediately.";
+    "No headings, no numbering, no extra commentary.";
 
-  // Sampled across the WHOLE script (opening + middle + end), not just the
-  // head: in an hour-long script most characters are introduced long after the
-  // first scenes, and any character missing from the bible got no fixed look.
-  const sampleAt = (budget: number) => {
-    if (script.length <= budget) return script;
-    const slice = (from: number, len: number) => {
-      const raw = script.slice(from, from + len);
-      const start = from === 0 ? 0 : raw.indexOf("\n") + 1;
-      const cut = raw.lastIndexOf("\n");
-      return raw.slice(start, cut > len * 0.5 ? cut : undefined);
-    };
-    const part = Math.floor(budget / 3);
-    return [
-      slice(0, part),
-      slice(Math.floor(script.length / 2) - part / 2, part),
-      slice(Math.max(0, script.length - part), part),
-    ]
-      .filter(Boolean)
-      .join("\n...\n");
-  };
+  // Gemini reads a million tokens, so the ENTIRE script goes in — no sampling,
+  // no chunking. Characters introduced late are now covered like the rest.
+  const body = script.length > MAX_SCRIPT_CHARS ? script.slice(0, MAX_SCRIPT_CHARS) : script;
 
-  let lastErr = "";
-  // shrink on every failure: context overflow is the usual cause for long scripts
-  for (const [i, budget] of [6000, 4000, 2500, 1200].entries()) {
-    try {
-      const out = await zaiChat(
-        [
-          { role: "system", content: system },
-          { role: "user", content: `SCRIPT SAMPLES (start, middle, end):\n${sampleAt(budget)}` },
-        ],
-
-        { maxTokens: 1200, timeoutMs: 180_000, attempts: 2, slot: i },
-      );
-      const bible = stripFences(out).slice(0, 2400);
-      if (bible.length > 20) return bible;
-      lastErr = "empty bible";
-
-    } catch (e) {
-      lastErr = e instanceof Error ? e.message : String(e);
-    }
+  try {
+    const out = await textChat(system, `FULL SCRIPT:\n${body}`, {
+      temperature: 0.4,
+      maxOutputTokens: 4_000,
+    });
+    const bible = stripFences(out).slice(0, 4000);
+    if (bible.length > 20) return bible;
+  } catch (e) {
+    console.error("buildCharacterBible failed, continuing without a bible:", e);
   }
-  console.error("buildCharacterBible failed, continuing without a bible:", lastErr);
   return "";
 }
 
