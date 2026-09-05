@@ -1,12 +1,7 @@
 import type { Segment } from "./script";
-import { paralonKeys, pixazoKeys, pickKey } from "./keys.server";
-import { acquire, acquireBestKey } from "./rate-limit.server";
+import { pixazoKeys, pickKey } from "./keys.server";
+import { geminiChat } from "./gemini.server";
 
-export const CHAT_URL = "https://paraloncloud.com/v1/chat/completions";
-/** Free-tier model only — the Paralon keys carry no credits. */
-export const CHAT_MODEL = "qwen3.8-27b";
-/** Measured Paralon free-tier quota: 5 requests per minute, per key. */
-export const PARALON_RPM = 5;
 const PIXAZO_URL = "https://gateway.pixazo.ai/flux-1-schnell/v1/getData";
 
 /**
