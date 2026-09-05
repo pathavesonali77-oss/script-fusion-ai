@@ -1,10 +1,10 @@
 /**
  * API key pools.
  *
- * Both providers are used with several keys at once so scenes can be
- * generated in parallel instead of queueing behind one key's rate limit.
- * Keys are read from PIXAZO_API_KEY_1..N / PARALON_API_KEY_1..N with the
- * unsuffixed name kept as a fallback for single-key setups.
+ * Image keys (Pixazo) are used in parallel — several renders at once.
+ * Text keys (Gemini) are NEVER used in parallel: one key is active at a time
+ * and the pool only advances when that key's daily quota is exhausted
+ * (see gemini.server.ts).
  */
 
 function readPool(prefix: string): string[] {
@@ -15,7 +15,6 @@ function readPool(prefix: string): string[] {
     const v = process.env[`${prefix}_${i}`];
     if (v && v.trim()) keys.push(v.trim());
   }
-  // de-dupe so the unsuffixed fallback doesn't double one key's weight
   return [...new Set(keys)];
 }
 
@@ -25,20 +24,19 @@ export function pixazoKeys(): string[] {
   return keys;
 }
 
-export function paralonKeys(): string[] {
-  const keys = readPool("PARALON_API_KEY");
-  if (keys.length === 0) throw new Error("Missing PARALON_API_KEY");
+export function geminiKeys(): string[] {
+  const keys = readPool("GEMINI_API_KEY");
+  if (keys.length === 0) throw new Error("Missing GEMINI_API_KEY");
   return keys;
 }
 
 /**
- * Deterministic spread: a caller passes the scene index as `slot`, so
- * consecutive scenes running at the same time land on different keys.
- * `attempt` shifts to the next key so a retry never hits the key that
- * just rate-limited or errored.
+ * Deterministic spread for the IMAGE pool: a caller passes the scene index as
+ * `slot`, so consecutive scenes running at the same time land on different
+ * keys. `attempt` shifts to the next key on a retry.
  */
 export function pickKey(keys: string[], slot: number, attempt = 0): string {
   const n = keys.length;
-  const i = (((slot % n) + n) % n + attempt) % n;
+  const i = ((((slot % n) + n) % n) + attempt) % n;
   return keys[i] as string;
 }
