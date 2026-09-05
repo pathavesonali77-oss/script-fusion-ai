@@ -1357,17 +1357,12 @@ export async function reviewPanel(
   slot = 0,
 ): Promise<string | null> {
   try {
-    const out = await zaiChat(
-      [
-        { role: "system", content: REVIEW_SYSTEM },
-        {
-          role: "user",
-          content:
-            (bible ? `CHARACTER SHEET:\n${bible}\n\n` : "") +
-            `SCRIPT LINE:\n${line}\n\nRENDERED PROMPT:\n${prompt}`,
-        },
-      ],
-      { temperature: 0.3, maxTokens: 600, attempts: 2, timeoutMs: 180_000, slot },
+    void slot;
+    const out = await textChat(
+      REVIEW_SYSTEM,
+      (bible ? `CHARACTER SHEET:\n${bible}\n\n` : "") +
+        `SCRIPT LINE:\n${line}\n\nRENDERED PROMPT:\n${prompt}`,
+      { temperature: 0.3, maxOutputTokens: 800, attempts: 2 },
     );
     const text = stripFences(out).trim();
     if (!text || /^ok\b/i.test(text) || text.length < 40) return null;
